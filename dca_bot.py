@@ -16,25 +16,35 @@ import yaml
 import json
 from datetime import datetime, date, timedelta
 from datetime import time as dtime
-import subprocess
+from github import Github
 
 def load_config_from_env():
     config_yaml = os.getenv('CONFIG_YML')
     if config_yaml:
         return yaml.safe_load(config_yaml)
-    with open('config/config.yml', 'r') as file:
-        return yaml.safe_load(file)
+    config_path = Path('config/config.yml')
+    if config_path.exists():
+        with open(config_path, 'r') as file:
+            return yaml.safe_load(file)
+    raise ValueError("Configuration file not found and CONFIG_YML environment variable is not set.")
 
 def load_api_keys_from_env():
+    required_vars = ['MEXC_API_KEY', 'MEXC_SECRET', 'TWITTER_API_KEY', 'TWITTER_API_SECRET', 
+                    'TWITTER_ACCESS_TOKEN', 'TWITTER_ACCESS_TOKEN_SECRET', 'GITHUB_TOKEN']
+    missing_vars = [var for var in required_vars if not os.getenv(var)]
+    if missing_vars:
+        logging.error(f"Missing environment variables: {', '.join(missing_vars)}")
+        raise ValueError(f"Missing environment variables: {', '.join(missing_vars)}")
+
     mexc_keys = {
         'MEXC': {
             'REAL': {
                 'APIKEY': os.getenv('MEXC_API_KEY'),
-                'SECRETKEY': os.getenv('MEXC_SECRET')
+                'SECRET': os.getenv('MEXC_SECRET')  # Changé de SECRETKEY à SECRET
             },
             'TEST': {
                 'APIKEY': os.getenv('MEXC_API_KEY'),
-                'SECRETKEY': os.getenv('MEXC_SECRET')
+                'SECRET': os.getenv('MEXC_SECRET')  # Changé de SECRETKEY à SECRET
             }
         }
     }
@@ -50,22 +60,47 @@ def load_api_keys_from_env():
 
 def push_to_github():
     try:
-        subprocess.run(['git', 'add', 'portfolio.json', 'trades/orders.csv'], check=True)
-        subprocess.run(['git', 'commit', '-m', 'Update portfolio and orders'], check=True)
-        subprocess.run(['git', 'push', 'origin', 'main'], check=True)
+        g = Github(os.getenv('GITHUB_TOKEN'))
+        repo = g.get_repo(os.getenv('GITHUB_REPO'))  # Format: "username/repo"
+        files_to_update = [
+            ('portfolio.json', 'Update portfolio'),
+            ('trades/orders.csv', 'Update orders')
+        ]
+        for file_path, commit_message in files_to_update:
+            with open(file_path, 'r') as file:
+                content = file.read()
+            try:
+                contents = repo.get_contents(file_path)
+                repo.update_file(
+                    path=file_path,
+                    message=commit_message,
+                    content=content,
+                    sha=contents.sha
+                )
+            except:
+                repo.create_file(
+                    path=file_path,
+                    message=commit_message,
+                    content=content
+                )
         logging.info("Pushed portfolio and orders to GitHub")
     except Exception as e:
         logging.error(f"Failed to push to GitHub: {str(e)}")
 
 class Dca(object):
     def __init__(self, cfg_path=None):
-        log_file = Path('trades/log.txt')
+        # Définir le répertoire persistant pour Render
+        self.data_dir = Path('/opt/render/project/data')
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        
+        log_file = self.data_dir / 'trades/log.txt'
         log_file.parent.mkdir(parents=True, exist_ok=True)
         register_logger(log_file=log_file)
         logging.info('Program started. Initializing variables...')
 
         self.cfg = load_config_from_env()
         self.mexc_keys, self.twitter_keys = load_api_keys_from_env()
+        self.twitter_verified = False  # Pour éviter des appels répétés à get_me()
 
         self.twitter_client = self.connect_to_twitter(self.twitter_keys)
         if self.twitter_client is None:
@@ -80,6 +115,7 @@ class Dca(object):
         try:
             self.exchange = connect_to_exchange(self.cfg, self.mexc_keys)
         except Exception as e:
+            logging.error(f"Failed to connect to exchange: {str(e)}")
             if self.cfg['SEND_NOTIFICATIONS']:
                 self.notify.critical(e, "launching the bot")
             raise e
@@ -97,29 +133,28 @@ class Dca(object):
         self.coin = {}
         for coin in self.cfg['COINS']:
             self.coin[coin.upper()] = self.cfg['COINS'][coin]
-            # Ajouter la précision des prix et des quantités
-            self.coin[coin.upper()]['price_precision'] = 2 if coin.upper() == 'BTC' else 4  # 2 pour BTC, 4 pour BKN et ATR
-            self.coin[coin.upper()]['quantity_precision'] = 8 if coin.upper() == 'BTC' else 2  # 8 pour BTC, 2 pour BKN et ATR
+            self.coin[coin.upper()]['price_precision'] = 2 if coin.upper() == 'BTC' else 4
+            self.coin[coin.upper()]['quantity_precision'] = 8 if coin.upper() == 'BTC' else 2
 
         self.order_book = {}
         self.coin_to_buy = []
         self.next_order = []
 
-        self.csv_path = Path('trades/orders.csv')
-        if Path(self.csv_path).is_file():
+        self.csv_path = self.data_dir / 'trades/orders.csv'
+        if self.csv_path.is_file():
             self.df_orders = read_csv_custom(self.csv_path)
         else:
             self.df_orders = pd.DataFrame()
 
-        self.stats_path = Path('trades/stats.csv')
-        if Path(self.stats_path).is_file():
+        self.stats_path = self.data_dir / 'trades/stats.csv'
+        if self.stats_path.is_file():
             self.df_stats = read_csv_custom(self.stats_path)
         else:
             self.df_stats = pd.DataFrame([], columns=['Coin', 'N', 'Quantity', 'AvgPrice', 'TotalCost', 'ROI', 'ROI%'])
             self.df_stats.set_index(['Coin'], inplace=True)
 
-        self.json_path = Path('trades/orders.json')
-        self.order_book_path = Path('trades/next_purchases.csv')
+        self.json_path = self.data_dir / 'trades/orders.json'
+        self.order_book_path = self.data_dir / 'trades/next_purchases.csv'
 
         self.get_dca_strategy()
         self.initialize_order_book()
@@ -154,28 +189,33 @@ class Dca(object):
             access_token_secret=twitter_keys['TWITTER']['ACCESS_TOKEN_SECRET']
         )
         max_retries = 5
-        base_delay = 5  # Délai initial en secondes
+        base_delay = 5
+        
+        if self.twitter_verified:
+            return client
         
         for attempt in range(max_retries):
             try:
                 user = client.get_me()
                 logging.info(f"Connexion à Twitter réussie : {user.data.username}")
+                self.twitter_verified = True
                 return client
             except TooManyRequests as e:
                 if attempt == max_retries - 1:
                     logging.error(f"Échec de la connexion à Twitter après {max_retries} tentatives : {str(e)}")
-                    return None  # Retourne None au lieu de lever une exception
-                delay = base_delay * (2 ** attempt)  # Backoff exponentiel : 5s, 10s, 20s, 40s, 80s
+                    return None
+                delay = base_delay * (2 ** attempt)
                 logging.warning(f"Erreur 429 Too Many Requests, tentative {attempt + 1}/{max_retries}. Réessai dans {delay} secondes...")
                 time.sleep(delay)
             except Exception as e:
                 logging.error(f"Échec de la connexion à Twitter : {str(e)}")
-                return None  # Retourne None pour autres erreurs (ex. 401 Unauthorized)
+                return None
         return None
 
     def load_portfolio(self):
+        portfolio_path = self.data_dir / 'portfolio.json'
         try:
-            with open('portfolio.json', 'r') as file:
+            with open(portfolio_path, 'r') as file:
                 portfolio = json.load(file)
                 if 'challenge_day' not in portfolio:
                     portfolio['challenge_day'] = 0
@@ -189,7 +229,8 @@ class Dca(object):
             }
 
     def save_portfolio(self, portfolio):
-        with open('portfolio.json', 'w') as file:
+        portfolio_path = self.data_dir / 'portfolio.json'
+        with open(portfolio_path, 'w') as file:
             json.dump(portfolio, file, indent=4)
 
     def update_portfolio(self, coin, quantity, price, amount):
@@ -253,7 +294,7 @@ class Dca(object):
         if not self.test_mode and len(tweet_lines) > 3:
             self.portfolio['challenge_day'] = self.portfolio.get('challenge_day', 0) + 1
             self.save_portfolio(self.portfolio)
-            push_to_github()  # Sauvegarde portfolio.json et orders.csv sur GitHub
+            push_to_github()
             tweet_lines.append("")
             tweet_lines.append("#DCA #Crypto #MEXC #Investing #Bitcoin #Trading #Blockchain")
             tweet = "\n".join(tweet_lines)
@@ -418,8 +459,8 @@ class Dca(object):
 
     def get_dca_strategy(self):
         for coin in self.coin:
-            if os.path.exists(f"trades/graph_{coin}_buy_conditions.png"):
-                os.remove(f"trades/graph_{coin}_buy_conditions.png")
+            if (self.data_dir / f'trades/graph_{coin}_buy_conditions.png').exists():
+                os.remove(self.data_dir / f'trades/graph_{coin}_buy_conditions.png')
             if type(self.coin[coin]['AMOUNT']) is dict:
                 if 'RANGE' not in self.coin[coin]['AMOUNT'] or 'PRICE_RANGE' not in self.coin[coin]['AMOUNT'] or 'MAPPING' not in self.coin[coin]['AMOUNT']:
                     raise Exception('If AMOUNT is a dictionary the following keys are required: '
@@ -564,4 +605,8 @@ class Dca(object):
             self.coin[coin]['ERROR_ATTEMPT'] = 0
 
 if __name__ == "__main__":
-    dca = Dca()
+    try:
+        dca = Dca()
+    except Exception as e:
+        logging.critical(f"Bot crashed: {str(e)}")
+        raise
