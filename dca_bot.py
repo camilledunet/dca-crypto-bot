@@ -28,8 +28,14 @@ def load_config_from_env():
 def load_api_keys_from_env():
     mexc_keys = {
         'MEXC': {
-            'API_KEY': os.getenv('MEXC_API_KEY'),
-            'SECRET': os.getenv('MEXC_SECRET')
+            'REAL': {
+                'API_KEY': os.getenv('MEXC_API_KEY'),
+                'SECRET': os.getenv('MEXC_SECRET')
+            },
+            'TEST': {
+                'API_KEY': os.getenv('MEXC_API_KEY'),
+                'SECRET': os.getenv('MEXC_SECRET')
+            }
         }
     }
     twitter_keys = {
