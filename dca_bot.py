@@ -68,6 +68,9 @@ class Dca(object):
         self.mexc_keys, self.twitter_keys = load_api_keys_from_env()
 
         self.twitter_client = self.connect_to_twitter(self.twitter_keys)
+        if self.twitter_client is None:
+            logging.warning("Twitter client non initialisé. Les tweets seront désactivés.")
+        
         self.portfolio = self.load_portfolio()
         self.test_mode = self.cfg.get('TEST', False)
 
@@ -161,14 +164,14 @@ class Dca(object):
             except TooManyRequests as e:
                 if attempt == max_retries - 1:
                     logging.error(f"Échec de la connexion à Twitter après {max_retries} tentatives : {str(e)}")
-                    raise e
+                    return None  # Retourne None au lieu de lever une exception
                 delay = base_delay * (2 ** attempt)  # Backoff exponentiel : 5s, 10s, 20s, 40s, 80s
                 logging.warning(f"Erreur 429 Too Many Requests, tentative {attempt + 1}/{max_retries}. Réessai dans {delay} secondes...")
                 time.sleep(delay)
             except Exception as e:
                 logging.error(f"Échec de la connexion à Twitter : {str(e)}")
-                raise e
-        return client
+                return None  # Retourne None pour autres erreurs (ex. 401 Unauthorized)
+        return None
 
     def load_portfolio(self):
         try:
@@ -258,11 +261,14 @@ class Dca(object):
                 logging.warning(f"Tweet trop long ({len(tweet)} caractères), réduction des hashtags")
                 tweet_lines[-1] = "#DCA #Crypto #MEXC"
                 tweet = "\n".join(tweet_lines)
-            try:
-                self.twitter_client.create_tweet(text=tweet)
-                logging.info(f"Posted to X: {tweet}")
-            except Exception as e:
-                logging.error(f"Error posting to X: {str(e)}")
+            if self.twitter_client is not None:
+                try:
+                    self.twitter_client.create_tweet(text=tweet)
+                    logging.info(f"Posted to X: {tweet}")
+                except Exception as e:
+                    logging.error(f"Error posting to X: {str(e)}")
+            else:
+                logging.warning(f"Tweet non publié car le client Twitter n'est pas initialisé : {tweet}")
 
     def execute_order(self, coin):
         type_order = 'market'
