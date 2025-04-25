@@ -1,0 +1,13 @@
+# Ignorer le dossier auth/ contenant les clés API
+auth/*
+
+# Ignorer les fichiers générés
+portfolio.json
+trades/*
+
+# Ignorer les logs
+*.log
+
+# Ignorer les environnements virtuels (si utilisés)
+venv/
+test_env/

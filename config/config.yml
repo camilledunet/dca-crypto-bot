@@ -1,0 +1,22 @@
+### Exchange section ###
+EXCHANGE: 'mexc'
+TEST: False
+SEND_NOTIFICATIONS: False
+
+### Coins to buy ###
+COINS:
+  BTC:
+    PAIRING: USDC
+    AMOUNT: 5
+    CYCLE: 'daily'
+    AT_TIME: '17:41'
+  BKN:
+    PAIRING: USDT
+    AMOUNT: 1.01
+    CYCLE: 'daily'
+    AT_TIME: '17:41'
+  ATR:
+    PAIRING: USDT
+    AMOUNT: 1.01
+    CYCLE: 'daily'
+    AT_TIME: '17:41'
