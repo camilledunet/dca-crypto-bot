@@ -140,18 +140,34 @@ class Dca(object):
             self.update_order_book()
 
     def connect_to_twitter(self, twitter_keys):
+        import tweepy
+        import time
+        from tweepy.errors import TooManyRequests
+        
         client = tweepy.Client(
             consumer_key=twitter_keys['TWITTER']['API_KEY'],
             consumer_secret=twitter_keys['TWITTER']['API_SECRET'],
             access_token=twitter_keys['TWITTER']['ACCESS_TOKEN'],
             access_token_secret=twitter_keys['TWITTER']['ACCESS_TOKEN_SECRET']
         )
-        try:
-            user = client.get_me()
-            logging.info(f"Connexion à Twitter réussie : {user.data.username}")
-        except Exception as e:
-            logging.error(f"Échec de la connexion à Twitter : {str(e)}")
-            raise e
+        max_retries = 5
+        base_delay = 5  # Délai initial en secondes
+        
+        for attempt in range(max_retries):
+            try:
+                user = client.get_me()
+                logging.info(f"Connexion à Twitter réussie : {user.data.username}")
+                return client
+            except TooManyRequests as e:
+                if attempt == max_retries - 1:
+                    logging.error(f"Échec de la connexion à Twitter après {max_retries} tentatives : {str(e)}")
+                    raise e
+                delay = base_delay * (2 ** attempt)  # Backoff exponentiel : 5s, 10s, 20s, 40s, 80s
+                logging.warning(f"Erreur 429 Too Many Requests, tentative {attempt + 1}/{max_retries}. Réessai dans {delay} secondes...")
+                time.sleep(delay)
+            except Exception as e:
+                logging.error(f"Échec de la connexion à Twitter : {str(e)}")
+                raise e
         return client
 
     def load_portfolio(self):
