@@ -29,12 +29,12 @@ def load_api_keys_from_env():
     mexc_keys = {
         'MEXC': {
             'REAL': {
-                'API_KEY': os.getenv('MEXC_API_KEY'),
-                'SECRET': os.getenv('MEXC_SECRET')
+                'APIKEY': os.getenv('MEXC_API_KEY'),
+                'SECRETKEY': os.getenv('MEXC_SECRET')
             },
             'TEST': {
-                'API_KEY': os.getenv('MEXC_API_KEY'),
-                'SECRET': os.getenv('MEXC_SECRET')
+                'APIKEY': os.getenv('MEXC_API_KEY'),
+                'SECRETKEY': os.getenv('MEXC_SECRET')
             }
         }
     }
