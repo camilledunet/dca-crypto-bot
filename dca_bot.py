@@ -16,21 +16,51 @@ import yaml
 import json
 from datetime import datetime, date, timedelta
 from datetime import time as dtime
+import subprocess
+
+def load_config_from_env():
+    config_yaml = os.getenv('CONFIG_YML')
+    if config_yaml:
+        return yaml.safe_load(config_yaml)
+    with open('config/config.yml', 'r') as file:
+        return yaml.safe_load(file)
+
+def load_api_keys_from_env():
+    mexc_keys = {
+        'MEXC': {
+            'API_KEY': os.getenv('MEXC_API_KEY'),
+            'SECRET': os.getenv('MEXC_SECRET')
+        }
+    }
+    twitter_keys = {
+        'TWITTER': {
+            'API_KEY': os.getenv('TWITTER_API_KEY'),
+            'API_SECRET': os.getenv('TWITTER_API_SECRET'),
+            'ACCESS_TOKEN': os.getenv('TWITTER_ACCESS_TOKEN'),
+            'ACCESS_TOKEN_SECRET': os.getenv('TWITTER_ACCESS_TOKEN_SECRET')
+        }
+    }
+    return mexc_keys, twitter_keys
+
+def push_to_github():
+    try:
+        subprocess.run(['git', 'add', 'portfolio.json', 'trades/orders.csv'], check=True)
+        subprocess.run(['git', 'commit', '-m', 'Update portfolio and orders'], check=True)
+        subprocess.run(['git', 'push', 'origin', 'main'], check=True)
+        logging.info("Pushed portfolio and orders to GitHub")
+    except Exception as e:
+        logging.error(f"Failed to push to GitHub: {str(e)}")
 
 class Dca(object):
-    def __init__(self, cfg_path, api_path):
+    def __init__(self, cfg_path=None):
         log_file = Path('trades/log.txt')
         log_file.parent.mkdir(parents=True, exist_ok=True)
         register_logger(log_file=log_file)
         logging.info('Program started. Initializing variables...')
 
-        cfg = load_config(cfg_path)
-        api = load_config(api_path)
+        self.cfg = load_config_from_env()
+        self.mexc_keys, self.twitter_keys = load_api_keys_from_env()
 
-        self.cfg = cfg
-        self.api_path = api_path
-
-        self.mexc_keys, self.twitter_keys = self.load_api_keys()
         self.twitter_client = self.connect_to_twitter(self.twitter_keys)
         self.portfolio = self.load_portfolio()
         self.test_mode = self.cfg.get('TEST', False)
@@ -56,8 +86,8 @@ class Dca(object):
             logging.warning("Balance checking failed: " + type(e).__name__ + " " + str(e))
 
         self.coin = {}
-        for coin in cfg['COINS']:
-            self.coin[coin.upper()] = cfg['COINS'][coin]
+        for coin in self.cfg['COINS']:
+            self.coin[coin.upper()] = self.cfg['COINS'][coin]
             # Ajouter la précision des prix et des quantités
             self.coin[coin.upper()]['price_precision'] = 2 if coin.upper() == 'BTC' else 4  # 2 pour BTC, 4 pour BKN et ATR
             self.coin[coin.upper()]['quantity_precision'] = 8 if coin.upper() == 'BTC' else 2  # 8 pour BTC, 2 pour BKN et ATR
@@ -103,13 +133,6 @@ class Dca(object):
             self.buy()
             self.update_order_book()
 
-    def load_api_keys(self):
-        with open(self.api_path, 'r') as file:
-            mexc_keys = yaml.safe_load(file)
-        with open('auth/twitter_keys.yml', 'r') as file:
-            twitter_keys = yaml.safe_load(file)
-        return mexc_keys, twitter_keys
-
     def connect_to_twitter(self, twitter_keys):
         client = tweepy.Client(
             consumer_key=twitter_keys['TWITTER']['API_KEY'],
@@ -129,7 +152,6 @@ class Dca(object):
         try:
             with open('portfolio.json', 'r') as file:
                 portfolio = json.load(file)
-                # S'assurer que challenge_day existe
                 if 'challenge_day' not in portfolio:
                     portfolio['challenge_day'] = 0
                 return portfolio
@@ -160,106 +182,11 @@ class Dca(object):
             return 0
         return ((current_price - avg_price) / avg_price) * 100
 
-    def update_order_book(self):
-        self.next_order = min(self.order_book.items(), key=lambda x: x[1])
-        self.coin_to_buy = self.next_order[0]
-        ordered_order_book = dict(sorted(self.order_book.items(), key=lambda item: item[1]))
-        df = pd.DataFrame([ordered_order_book]).T.rename_axis('Coin').rename(columns={0: 'Purchase Time'})
-        cycle = []
-        strategy = []
-        for coin in df.index:
-            cycle.append(self.coin[coin]['CYCLE'].lower())
-            strategy.append(self.coin[coin]['STRATEGY_STRING'])
-        df['Cycle'] = cycle
-        df['Strategy'] = strategy
-        df.to_csv(self.order_book_path)
-        return df
-
-    def get_dca_strategy(self):
-        for coin in self.coin:
-            if os.path.exists(f"trades/graph_{coin}_buy_conditions.png"):
-                os.remove(f"trades/graph_{coin}_buy_conditions.png")
-            if type(self.coin[coin]['AMOUNT']) is dict:
-                if 'RANGE' not in self.coin[coin]['AMOUNT'] or 'PRICE_RANGE' not in self.coin[coin]['AMOUNT'] or 'MAPPING' not in self.coin[coin]['AMOUNT']:
-                    raise Exception('If AMOUNT is a dictionary the following keys are required: '
-                                    '"AMOUNT", "PRICE_RANGE", "MAPPING".')
-                self.coin[coin]['MAPPER'] = PriceMapper(self.coin[coin]['AMOUNT']['RANGE'],
-                                                        self.coin[coin]['AMOUNT']['PRICE_RANGE'],
-                                                        self.coin[coin]['AMOUNT']['MAPPING'],
-                                                        coin,
-                                                        self.coin[coin]['PAIRING'])
-                self.coin[coin]['MAPPER'].plot()
-                self.coin[coin]['STRATEGY'] = 'VariableAmount'
-                cost = f"{self.coin[coin]['AMOUNT']['RANGE'][0]}-" \
-                       f"{self.coin[coin]['AMOUNT']['RANGE'][1]}"
-                price_range = f"{self.coin[coin]['AMOUNT']['PRICE_RANGE'][0]}-" \
-                              f"{self.coin[coin]['AMOUNT']['PRICE_RANGE'][1]}"
-                self.coin[coin]['STRATEGY_STRING'] = f"{cost} {self.coin[coin]['PAIRING']} to {price_range} {coin} {self.coin[coin]['AMOUNT']['MAPPING'][0:3]}."
-                if 'BUYBELOW' in self.coin[coin] and self.coin[coin]['BUYBELOW'] is not None:
-                    logging.warning('Option "BUYBELOW" is not compatible with a range of AMOUNT values. '
-                                    'Disabling it')
-                    self.coin[coin]['BUYBELOW'] = None
-            elif 'BUYBELOW' in self.coin[coin] and self.coin[coin]['BUYBELOW'] is not None:
-                self.coin[coin]['MAPPER'] = PriceMapper([0, self.coin[coin]['AMOUNT']],
-                                                        [0, self.coin[coin]['BUYBELOW']],
-                                                        'constant',
-                                                        coin,
-                                                        self.coin[coin]['PAIRING'])
-                self.coin[coin]['MAPPER'].plot()
-                self.coin[coin]['STRATEGY'] = 'BuyBelow'
-                self.coin[coin]['STRATEGY_STRING'] = f"BuyBelow {self.coin[coin]['BUYBELOW']} {self.coin[coin]['PAIRING']}"
-            else:
-                self.coin[coin]['STRATEGY'] = 'Classic'
-                self.coin[coin]['STRATEGY_STRING'] = f"Classic"
-
-    def check_funds(self):
-        cost = self.coin[self.coin_to_buy]['AMOUNT']
-        if type(cost) is dict:
-            cost = cost['RANGE'][1]
-        pairing = self.coin[self.coin_to_buy]['PAIRING']
-        try:
-            balance = self.exchange.fetch_balance()
-        except:
-            balance = []
-            logging.warning("Balance checking failed.")
-
-        if balance:
-            balance_type = 'total' if self.exchange.id == 'kraken' else 'free'
-            if pairing in balance[balance_type]:
-                coin_balance = balance[balance_type][pairing]
-            else:
-                coin_balance = 0
-            if cost > coin_balance:
-                logging.warning(f"Insufficient funds for the next {self.coin_to_buy} purchase. Top up your account!")
-                if self.cfg['SEND_NOTIFICATIONS']:
-                    next_purchase = self.next_order[1].strftime('%d %b %Y at %H:%M')
-                    self.notify.warning_funds(self.coin_to_buy,
-                                              next_purchase,
-                                              pairing,
-                                              cost,
-                                              coin_balance)
-
-    def wait(self):
-        time_remaining = (self.next_order[1] - datetime.today()).total_seconds()
-        if time_remaining < 0:
-            time_remaining = 0
-        if self.coin[self.next_order[0]]['STRATEGY'] == 'VariableAmount':
-            cost = f"{self.coin[self.next_order[0]]['AMOUNT']['RANGE'][0]}-" \
-                   f"{self.coin[self.next_order[0]]['AMOUNT']['RANGE'][1]}"
-        else:
-            cost = self.coin[self.next_order[0]]['AMOUNT']
-        logging.info(f"Next purchase: {self.next_order[0]} ({cost} "
-                     f"{self.coin[self.next_order[0]]['PAIRING']}) on {self.next_order[1].strftime('%Y-%m-%d %H:%M')}."
-                     f"\nTime remaining: {int(time_remaining)} s")
-
-        time.sleep(time_remaining)
-
     def buy(self):
-        # Initialiser le tweet avec le numéro du jour
         day_number = self.portfolio.get('challenge_day', 0) + 1
         tweet_lines = [f"Jour {day_number}",
                        f"Challenge DCA quotidiens dans laquelle j'achète sur la plateforme MEXC (code parrainage : 12KxM2). 5$ en BTC, 1$ en BKN et 1$ en ATR",
-                       ""]  # Espace après l'introduction
+                       ""]
         coins_to_buy = list(self.coin.keys())
 
         for coin in coins_to_buy:
@@ -298,17 +225,16 @@ class Dca(object):
                                         self.df_stats.loc[coin],
                                         f"Mode: {self.coin[coin]['STRATEGY_STRING']}")
         
-        # Incrémenter challenge_day après tous les achats et sauvegarder
-        if not self.test_mode and len(tweet_lines) > 3:  # Vérifier qu'il y a des achats
+        if not self.test_mode and len(tweet_lines) > 3:
             self.portfolio['challenge_day'] = self.portfolio.get('challenge_day', 0) + 1
             self.save_portfolio(self.portfolio)
-            tweet_lines.append("")  # Espace avant les hashtags
+            push_to_github()  # Sauvegarde portfolio.json et orders.csv sur GitHub
+            tweet_lines.append("")
             tweet_lines.append("#DCA #Crypto #MEXC #Investing #Bitcoin #Trading #Blockchain")
             tweet = "\n".join(tweet_lines)
-            # Vérifier la longueur du tweet
             if len(tweet) > 280:
                 logging.warning(f"Tweet trop long ({len(tweet)} caractères), réduction des hashtags")
-                tweet_lines[-1] = "#DCA #Crypto #MEXC"  # Réduire les hashtags
+                tweet_lines[-1] = "#DCA #Crypto #MEXC"
                 tweet = "\n".join(tweet_lines)
             try:
                 self.twitter_client.create_tweet(text=tweet)
@@ -415,16 +341,146 @@ class Dca(object):
             self.order_book[coin] = datetime.today() + timedelta(seconds=retry_after)
         else:
             if self.coin[coin]['CYCLE'].lower() == 'minutely':
-                self.coin[coin]['SCHEDULE'] = self.coin[coin]['SCHEDULE'] + timedelta(minutes=1)
+                if not self.cfg['TEST']:
+                    error_string = 'Cycle "minutely" is only available in TEST mode.'
+                    logging.error(error_string)
+                    raise Exception(error_string)
+                self.coin[coin]['SCHEDULE'] = datetime.now()
             elif self.coin[coin]['CYCLE'].lower() == 'daily':
-                self.coin[coin]['SCHEDULE'] = self.coin[coin]['SCHEDULE'] + timedelta(days=1)
-            elif self.coin[coin]['CYCLE'].lower() == 'bi-weekly':
-                self.coin[coin]['SCHEDULE'] = self.coin[coin]['SCHEDULE'] + timedelta(days=14)
-            elif self.coin[coin]['CYCLE'].lower() == 'weekly':
-                self.coin[coin]['SCHEDULE'] = self.coin[coin]['SCHEDULE'] + timedelta(days=7)
+                at_time = get_hour_minute(self.coin[coin]['AT_TIME'])
+                scheduled_datetime = datetime.combine(date.today(), dtime(at_time[0], at_time[1]))
+                if scheduled_datetime < datetime.now():
+                    scheduled_datetime = scheduled_datetime + timedelta(days=1)
+                self.coin[coin]['SCHEDULE'] = scheduled_datetime
+            elif 'weekly' in self.coin[coin]['CYCLE'].lower():
+                at_time = get_hour_minute(self.coin[coin]['AT_TIME'])
+                on_weekday = get_on_weekday(self.coin[coin]['ON_WEEKDAY'])
+                today = date.today()
+                scheduled_datetime = datetime.combine(today + timedelta((on_weekday - today.weekday()) % 7),
+                                                     dtime(at_time[0], at_time[1]))
+                if scheduled_datetime < datetime.now():
+                    scheduled_datetime = scheduled_datetime + timedelta(days=7)
+                if 'bi-weekly' in self.coin[coin]['CYCLE'].lower() and self.order_book_path.exists():
+                    df = read_csv_custom(self.order_book_path)
+                    previously = None
+                    for cn in df.index:
+                        if cn == coin and df.loc[cn]['Cycle'] == 'bi-weekly':
+                            previously = df.loc[cn]['Purchase Time']
+                    if previously:
+                        previously = datetime.strptime(previously, '%Y-%m-%d %H:%M:%S')
+                        if previously == scheduled_datetime + timedelta(days=7):
+                            scheduled_datetime = previously
+                self.coin[coin]['SCHEDULE'] = scheduled_datetime
             elif self.coin[coin]['CYCLE'].lower() == 'monthly':
-                self.coin[coin]['SCHEDULE'] = self.coin[coin]['SCHEDULE'] + relativedelta(months=1)
+                at_time = get_hour_minute(self.coin[coin]['AT_TIME'])
+                on_day = get_on_day(self.coin[coin]['ON_DAY'])
+                today = datetime.now()
+                scheduled_datetime = datetime.combine(datetime(today.year, today.month, on_day),
+                                                     dtime(at_time[0], at_time[1]))
+                if scheduled_datetime < datetime.now():
+                    scheduled_datetime = scheduled_datetime + relativedelta(months=1)
+                self.coin[coin]['SCHEDULE'] = scheduled_datetime
+            else:
+                error_string = 'Cycle not recognized. Valid cycle strings are: "daily", "weekly", ' \
+                               '"bi-weekly" and "monthly".'
+                logging.error(error_string)
+                raise Exception(error_string)
+
             self.order_book[coin] = self.coin[coin]['SCHEDULE']
+
+    def get_dca_strategy(self):
+        for coin in self.coin:
+            if os.path.exists(f"trades/graph_{coin}_buy_conditions.png"):
+                os.remove(f"trades/graph_{coin}_buy_conditions.png")
+            if type(self.coin[coin]['AMOUNT']) is dict:
+                if 'RANGE' not in self.coin[coin]['AMOUNT'] or 'PRICE_RANGE' not in self.coin[coin]['AMOUNT'] or 'MAPPING' not in self.coin[coin]['AMOUNT']:
+                    raise Exception('If AMOUNT is a dictionary the following keys are required: '
+                                    '"AMOUNT", "PRICE_RANGE", "MAPPING".')
+                self.coin[coin]['MAPPER'] = PriceMapper(self.coin[coin]['AMOUNT']['RANGE'],
+                                                        self.coin[coin]['AMOUNT']['PRICE_RANGE'],
+                                                        self.coin[coin]['AMOUNT']['MAPPING'],
+                                                        coin,
+                                                        self.coin[coin]['PAIRING'])
+                self.coin[coin]['MAPPER'].plot()
+                self.coin[coin]['STRATEGY'] = 'VariableAmount'
+                cost = f"{self.coin[coin]['AMOUNT']['RANGE'][0]}-" \
+                       f"{self.coin[coin]['AMOUNT']['RANGE'][1]}"
+                price_range = f"{self.coin[coin]['AMOUNT']['PRICE_RANGE'][0]}-" \
+                              f"{self.coin[coin]['AMOUNT']['PRICE_RANGE'][1]}"
+                self.coin[coin]['STRATEGY_STRING'] = f"{cost} {self.coin[coin]['PAIRING']} to {price_range} {coin} {self.coin[coin]['AMOUNT']['MAPPING'][0:3]}."
+                if 'BUYBELOW' in self.coin[coin] and self.coin[coin]['BUYBELOW'] is not None:
+                    logging.warning('Option "BUYBELOW" is not compatible with a range of AMOUNT values. '
+                                    'Disabling it')
+                    self.coin[coin]['BUYBELOW'] = None
+            elif 'BUYBELOW' in self.coin[coin] and self.coin[coin]['BUYBELOW'] is not None:
+                self.coin[coin]['MAPPER'] = PriceMapper([0, self.coin[coin]['AMOUNT']],
+                                                        [0, self.coin[coin]['BUYBELOW']],
+                                                        'constant',
+                                                        coin,
+                                                        self.coin[coin]['PAIRING'])
+                self.coin[coin]['MAPPER'].plot()
+                self.coin[coin]['STRATEGY'] = 'BuyBelow'
+                self.coin[coin]['STRATEGY_STRING'] = f"BuyBelow {self.coin[coin]['BUYBELOW']} {self.coin[coin]['PAIRING']}"
+            else:
+                self.coin[coin]['STRATEGY'] = 'Classic'
+                self.coin[coin]['STRATEGY_STRING'] = f"Classic"
+
+    def check_funds(self):
+        cost = self.coin[self.coin_to_buy]['AMOUNT']
+        if type(cost) is dict:
+            cost = cost['RANGE'][1]
+        pairing = self.coin[self.coin_to_buy]['PAIRING']
+        try:
+            balance = self.exchange.fetch_balance()
+        except:
+            balance = []
+            logging.warning("Balance checking failed.")
+
+        if balance:
+            balance_type = 'total' if self.exchange.id == 'kraken' else 'free'
+            if pairing in balance[balance_type]:
+                coin_balance = balance[balance_type][pairing]
+            else:
+                coin_balance = 0
+            if cost > coin_balance:
+                logging.warning(f"Insufficient funds for the next {self.coin_to_buy} purchase. Top up your account!")
+                if self.cfg['SEND_NOTIFICATIONS']:
+                    next_purchase = self.next_order[1].strftime('%d %b %Y at %H:%M')
+                    self.notify.warning_funds(self.coin_to_buy,
+                                              next_purchase,
+                                              pairing,
+                                              cost,
+                                              coin_balance)
+
+    def wait(self):
+        time_remaining = (self.next_order[1] - datetime.today()).total_seconds()
+        if time_remaining < 0:
+            time_remaining = 0
+        if self.coin[self.next_order[0]]['STRATEGY'] == 'VariableAmount':
+            cost = f"{self.coin[self.next_order[0]]['AMOUNT']['RANGE'][0]}-" \
+                   f"{self.coin[self.next_order[0]]['AMOUNT']['RANGE'][1]}"
+        else:
+            cost = self.coin[self.next_order[0]]['AMOUNT']
+        logging.info(f"Next purchase: {self.next_order[0]} ({cost} "
+                     f"{self.coin[self.next_order[0]]['PAIRING']}) on {self.next_order[1].strftime('%Y-%m-%d %H:%M')}."
+                     f"\nTime remaining: {int(time_remaining)} s")
+
+        time.sleep(time_remaining)
+
+    def update_order_book(self):
+        self.next_order = min(self.order_book.items(), key=lambda x: x[1])
+        self.coin_to_buy = self.next_order[0]
+        ordered_order_book = dict(sorted(self.order_book.items(), key=lambda item: item[1]))
+        df = pd.DataFrame([ordered_order_book]).T.rename_axis('Coin').rename(columns={0: 'Purchase Time'})
+        cycle = []
+        strategy = []
+        for coin in df.index:
+            cycle.append(self.coin[coin]['CYCLE'].lower())
+            strategy.append(self.coin[coin]['STRATEGY_STRING'])
+        df['Cycle'] = cycle
+        df['Strategy'] = strategy
+        df.to_csv(self.order_book_path)
+        return df
 
     def initialize_order_book(self):
         for coin in self.coin:
@@ -474,13 +530,10 @@ class Dca(object):
                 logging.error(error_string)
                 raise Exception(error_string)
 
-        for coin in self.coin:
             self.order_book[coin] = self.coin[coin]['SCHEDULE']
             self.coin[coin]['SYMBOL'] = coin + '/' + self.coin[coin]['PAIRING']
             self.coin[coin]['LASTERROR'] = []
             self.coin[coin]['ERROR_ATTEMPT'] = 0
 
 if __name__ == "__main__":
-    cfg_path = 'config/config.yml'
-    api_path = 'auth/API_keys.yml'
-    Dca(cfg_path, api_path)
+    dca = Dca()
