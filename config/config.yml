@@ -1,7 +1,7 @@
 ### Exchange section ###
 EXCHANGE: 'mexc'
-TEST: True
-SEND_NOTIFICATIONS: False
+TEST: False
+SEND_NOTIFICATIONS: True
 
 ### Coins to buy ###
 COINS:
