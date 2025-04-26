@@ -9,14 +9,14 @@ COINS:
     PAIRING: USDC
     AMOUNT: 5
     CYCLE: 'daily'
-    AT_TIME: '16:00'
+    AT_TIME: '14:07'
   BKN:
     PAIRING: USDT
     AMOUNT: 1.01
     CYCLE: 'daily'
-    AT_TIME: '16:00'
+    AT_TIME: '14:07'
   ATR:
     PAIRING: USDT
     AMOUNT: 1.01
     CYCLE: 'daily'
-    AT_TIME: '16:00'
+    AT_TIME: '14:07'
