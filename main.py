@@ -60,11 +60,11 @@ try:
                 print(f"Compteur chargé: {counter}", flush=True)
                 return counter
         except FileNotFoundError:
-            print("Compteur non trouvé, initialisation à 1", flush=True)
-            return 1
+            print("Compteur non trouvé, initialisation à 5", flush=True)
+            return 5  # Restaurer à Jour 5
         except Exception as e:
             print(f"Erreur lors du chargement du compteur: {e}", flush=True)
-            return 1
+            return 5
 
     def save_day_counter(counter):
         try:
@@ -106,7 +106,7 @@ try:
                 if totals['BTC']['total_invested'] < 5.0 * load_day_counter():
                     missing_days = load_day_counter() - int(totals['BTC']['total_invested'] / 5.0)
                     if missing_days > 0:
-                        btc_price = 60000  # Prix estimé, à ajuster
+                        btc_price = 95500  # Prix estimé, à ajuster
                         additional_quantity = missing_days * (5.0 / btc_price)
                         totals['BTC']['total_quantity'] += additional_quantity
                         totals['BTC']['total_invested'] += missing_days * 5.0
